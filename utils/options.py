@@ -1,7 +1,15 @@
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
 import yaml
 
-# Load YAML configuration file
-def load_config(path='_config.yml'):
-    with open(path, 'r') as f:
-        config = yaml.safe_load(f)
-    return config
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "config.yml"
+
+def load_config() -> dict:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, default=str(DEFAULT_CONFIG_PATH))
+    args = parser.parse_args()
+    with open(args.config, "r", encoding="utf-8") as file:
+        return yaml.safe_load(file)
