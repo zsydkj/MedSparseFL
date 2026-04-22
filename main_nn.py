@@ -1,153 +1,101 @@
-import os
+from __future__ import annotations
+
+from pathlib import Path
+
 import torch
 import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import DataLoader
-from torchvision import datasets, transforms
-import numpy as np
 
-from utils.options import load_config
+from main_fed import build_datasets, evaluate_multiclass, evaluate_multilabel, set_seed
 from models.Nets import ResNet18
+from utils.options import load_config
 
 
-# --------------------------
-# Utility functions
-# --------------------------
-def set_seed(seed=42):
-    """Set random seed for reproducibility"""
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+
+def build_criterion(task_type: str) -> nn.Module:
+    if task_type == "multilabel":
+        return nn.BCEWithLogitsLoss()
+    return nn.CrossEntropyLoss()
 
 
-def evaluate(model, dataloader, device='cuda'):
-    """Evaluate classification accuracy"""
-    model.eval()
-    correct, total = 0, 0
-    with torch.no_grad():
-        for x, y in dataloader:
-            x, y = x.to(device), y.to(device)
-            output = model(x)
-            preds = output.argmax(dim=1)
-            correct += (preds == y).sum().item()
-            total += y.size(0)
-    return correct / total
 
-
-# --------------------------
-# Main training / testing
-# --------------------------
-def main():
+def main() -> None:
     config = load_config()
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    set_seed(config.get('seed', 42))
+    set_seed(int(config.get("seed", 42)))
+    device = "cuda" if torch.cuda.is_available() and config.get("use_cuda", True) else "cpu"
 
-    # --------------------------
-    # Data preparation
-    # --------------------------
-    transform_train = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor()
-    ])
-    transform_test = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor()
-    ])
-
-    train_dataset = datasets.ImageFolder(
-        root=os.path.join(config['data_path'], 'train'),
-        transform=transform_train
-    )
-
-    test_dataset = datasets.ImageFolder(
-        root=os.path.join(config['data_path'], 'test'),
-        transform=transform_test
-    )
-
-    train_loader = DataLoader(
+    train_dataset, test_dataset, task_type, num_classes = build_datasets(config)
+    train_loader = torch.utils.data.DataLoader(
         train_dataset,
-        batch_size=config['batch_size'],
+        batch_size=int(config["batch_size"]),
         shuffle=True,
-        num_workers=config.get('num_workers', 4)
+        num_workers=int(config.get("num_workers", 0)),
     )
-
-    test_loader = DataLoader(
+    test_loader = torch.utils.data.DataLoader(
         test_dataset,
-        batch_size=config['batch_size'],
+        batch_size=int(config["batch_size"]),
         shuffle=False,
-        num_workers=config.get('num_workers', 4)
+        num_workers=int(config.get("num_workers", 0)),
     )
 
-    # --------------------------
-    # Model
-    # --------------------------
-    model = ResNet18(num_classes=config['num_classes']).to(device)
+    model = ResNet18(num_classes=num_classes).to(device)
+    criterion = build_criterion(task_type)
+    optimizer = torch.optim.SGD(
+        model.parameters(),
+        lr=float(config["lr"]),
+        momentum=float(config.get("momentum", 0.9)),
+        weight_decay=float(config.get("weight_decay", 5e-4)),
+    )
 
-    # --------------------------
-    # Test only mode
-    # --------------------------
-    if config.get('test_only', False):
-        model_path = os.path.join(config.get('save_path', '.'), 'best_baseline_model.pth')
-        model.load_state_dict(torch.load(model_path, map_location=device))
-        acc = evaluate(model, test_loader, device)
-        print(f"Test Accuracy: {acc:.4f}")
+    save_dir = Path(config.get("save_dir", "./checkpoints"))
+    save_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_name = config.get("baseline_checkpoint", "best_baseline_model.pth")
+    epochs = int(config.get("baseline_epochs", config.get("epochs", 50)))
+
+    if bool(config.get("baseline_test_only", False)):
+        checkpoint_path = save_dir / checkpoint_name
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(f"Baseline checkpoint not found: {checkpoint_path}")
+        model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+        metrics = evaluate_multiclass(model, test_loader, device) if task_type == "multiclass" else evaluate_multilabel(model, test_loader, device)
+        metric_name, metric_value = next(iter(metrics.items()))
+        print(f"Baseline test | {metric_name}: {metric_value:.4f}")
         return
 
-    # --------------------------
-    # Training setup
-    # --------------------------
-    optimizer = optim.SGD(
-        model.parameters(),
-        lr=config['lr'],
-        momentum=0.9,
-        weight_decay=5e-4
-    )
-
-    criterion = nn.CrossEntropyLoss()
-
-    best_acc = 0.0
-    epochs = config.get('epochs', 50)
-
-    # --------------------------
-    # Training loop
-    # --------------------------
+    best_metric = -1.0
     for epoch in range(epochs):
         model.train()
         running_loss = 0.0
+        total_samples = 0
 
-        for x, y in train_loader:
-            x, y = x.to(device), y.to(device)
+        for inputs, targets in train_loader:
+            inputs = inputs.to(device)
+            targets = targets.to(device)
+            if task_type == "multiclass":
+                targets = targets.long()
+            else:
+                targets = targets.float()
 
             optimizer.zero_grad()
-            output = model(x)
-            loss = criterion(output, y)
+            logits = model(inputs)
+            loss = criterion(logits, targets)
             loss.backward()
             optimizer.step()
 
-            running_loss += loss.item() * x.size(0)
+            batch_size = inputs.size(0)
+            running_loss += loss.item() * batch_size
+            total_samples += batch_size
 
-        avg_loss = running_loss / len(train_loader.dataset)
-        acc = evaluate(model, test_loader, device)
+        metrics = evaluate_multiclass(model, test_loader, device) if task_type == "multiclass" else evaluate_multilabel(model, test_loader, device)
+        metric_name, metric_value = next(iter(metrics.items()))
+        epoch_loss = running_loss / max(total_samples, 1)
+        print(f"Epoch {epoch + 1:03d} | loss: {epoch_loss:.4f} | {metric_name}: {metric_value:.4f}")
 
-        print(f"Epoch [{epoch + 1}/{epochs}] "
-              f"Loss: {avg_loss:.4f} "
-              f"Test Accuracy: {acc:.4f}")
+        if metric_value > best_metric:
+            best_metric = metric_value
+            torch.save(model.state_dict(), save_dir / checkpoint_name)
 
-        # Save best model
-        if acc > best_acc:
-            best_acc = acc
-            os.makedirs(config.get('save_path', '.'), exist_ok=True)
-            torch.save(model.state_dict(),
-                       os.path.join(config.get('save_path', '.'), 'best_baseline_model.pth'))
-            print("Best baseline model updated!")
-
-    print(f"\nTraining completed. Best Test Accuracy: {best_acc:.4f}")
+    print(f"Best baseline metric: {best_metric:.4f}")
 
 
-# --------------------------
-# Entry point
-# --------------------------
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
