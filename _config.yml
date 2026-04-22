@@ -1,46 +1,59 @@
-# Dataset configuration
-data_path: ./data
-dataset: CIFAR10
-num_classes: 10
-image_size: 32
-
-# Federated learning settings
-num_clients: 10
-clients_per_round: 5
-local_epochs: 5
-batch_size: 64
-learning_rate: 0.01
-weight_decay: 0.0001
-momentum: 0.9
-rounds: 100
-
-# Gradient Score Network (GSN) settings
-gsn_hidden_size: 128
-gsn_layers: 2
-residual_feedback: true
-
-# Sparse communication
-sparsity_ratio: 0.1
-count_sketch_k: 4
-count_sketch_m: 256
-
-# Privacy-preserving
-enable_masking: true
-enable_ahe: true
-ahe_key_size: 2048
-quantization_scale: 1e4
-
-# Server aggregation
-historical_window: 5
-anomaly_threshold: 0.3
-
-# Training settings
-device: cuda
 seed: 42
-log_interval: 10
-save_model: true
-save_path: ./checkpoints
+use_cuda: true
+save_dir: ./checkpoints
 
-# Evaluation
-evaluate_every: 5
-metrics: [AUC, Macro-F1]
+dataset_type: imagefolder
+train_dir: ./data/train
+test_dir: ./data/test
+image_size: [224, 224]
+
+# dataset_type: ham10000
+# metadata_csv: ./data/HAM10000_metadata.csv
+# image_root: ./data/HAM10000_images
+# split_column: split
+# diagnosis_column: dx
+# image_id_column: image_id
+# train_split_name: train
+# test_split_name: test
+
+# dataset_type: chexpert
+# train_csv: ./data/chexpert_train.csv
+# valid_csv: ./data/chexpert_valid.csv
+# image_root: ./data
+# path_column: Path
+# label_columns: [Atelectasis, Cardiomegaly, Consolidation, Edema, Pleural Effusion]
+# uncertain_value: 0.0
+
+# dataset_type: csv_multiclass
+# train_csv: ./data/train.csv
+# test_csv: ./data/test.csv
+# image_root: ./data/images
+# image_path_column: image_path
+# label_columns: [label]
+
+num_clients: 10
+client_fraction: 0.5
+rounds: 50
+local_epochs: 1
+batch_size: 16
+num_workers: 0
+lr: 0.01
+gsn_lr: 0.005
+dirichlet_alpha: 0.5
+
+gsn_block_size: 2048
+target_upload_ratio: 0.1
+ema_decay: 0.9
+gsn_reg_lambda: 0.05
+
+count_sketch_num_hash: 4
+count_sketch_size: 256
+count_sketch_seed: 1234
+quantization_scale_exp: 4
+mask_master_seed: 2026
+mask_bound: 16
+paillier_key_bits: 256
+
+support_window_size: 5
+support_epsilon: 0.3
+support_min_frequency: 0.6
