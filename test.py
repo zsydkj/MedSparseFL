@@ -1,113 +1,71 @@
-import os
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
 import torch
-from torch.utils.data import DataLoader
-from torchvision import datasets, transforms
-import numpy as np
 
-from utils.options import load_config
+from main_fed import build_datasets, evaluate_multiclass, evaluate_multilabel, set_seed
 from models.Nets import ResNet18
+from utils.options import load_config
 
 
-# --------------------------
-# Utility functions
-# --------------------------
-def set_seed(seed=42):
-    """Set random seed for reproducibility"""
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, default=None)
+    parser.add_argument("--model_type", type=str, choices=["baseline", "federated"], default=None)
+    parser.add_argument("--model_path", type=str, default=None)
+    return parser.parse_args()
 
 
-def evaluate(model, dataloader, device='cuda'):
-    """Evaluate classification accuracy"""
-    model.eval()
-    correct = 0
-    total = 0
 
-    with torch.no_grad():
-        for x, y in dataloader:
-            x, y = x.to(device), y.to(device)
-            outputs = model(x)
-            preds = outputs.argmax(dim=1)
-
-            correct += (preds == y).sum().item()
-            total += y.size(0)
-
-    accuracy = correct / total
-    return accuracy
-
-
-# --------------------------
-# Main testing function
-# --------------------------
-def main():
+def main() -> None:
+    args = parse_args()
     config = load_config()
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    set_seed(config.get('seed', 42))
+    if args.config is not None:
+        from pathlib import Path as _Path
+        import yaml
 
-    # --------------------------
-    # Prepare test dataset
-    # --------------------------
-    transform_test = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor()
-    ])
+        with open(_Path(args.config), "r", encoding="utf-8") as file:
+            loaded = yaml.safe_load(file)
+        if not isinstance(loaded, dict):
+            raise ValueError("Configuration file must contain a YAML mapping")
+        config = loaded
 
-    test_dataset = datasets.ImageFolder(
-        root=os.path.join(config['data_path'], 'test'),
-        transform=transform_test
-    )
-
-    test_loader = DataLoader(
+    set_seed(int(config.get("seed", 42)))
+    device = "cuda" if torch.cuda.is_available() and config.get("use_cuda", True) else "cpu"
+    _, test_dataset, task_type, num_classes = build_datasets(config)
+    test_loader = torch.utils.data.DataLoader(
         test_dataset,
-        batch_size=config['batch_size'],
+        batch_size=int(config["batch_size"]),
         shuffle=False,
-        num_workers=config.get('num_workers', 4)
+        num_workers=int(config.get("num_workers", 0)),
     )
 
-    # --------------------------
-    # Initialize model
-    # --------------------------
-    model = ResNet18(num_classes=config['num_classes']).to(device)
+    model = ResNet18(num_classes=num_classes).to(device)
+    model_type = args.model_type or config.get("test_model_type", "federated")
 
-    # --------------------------
-    # Choose model type to test
-    # --------------------------
-    model_type = config.get('model_type', 'baseline')
-    # options: 'baseline' or 'federated'
-
-    if model_type == 'baseline':
-        model_path = os.path.join(
-            config.get('save_path', '.'),
-            'best_baseline_model.pth'
-        )
-    elif model_type == 'federated':
-        model_path = os.path.join(
-            config.get('save_path', '.'),
-            'best_global_model.pth'
-        )
+    if args.model_path is not None:
+        checkpoint_path = Path(args.model_path)
     else:
-        raise ValueError("model_type must be 'baseline' or 'federated'")
+        save_dir = Path(config.get("save_dir", "./checkpoints"))
+        checkpoint_name = (
+            config.get("baseline_checkpoint", "best_baseline_model.pth")
+            if model_type == "baseline"
+            else config.get("federated_checkpoint", "best_global_model.pth")
+        )
+        checkpoint_path = save_dir / checkpoint_name
 
-    # --------------------------
-    # Load model weights
-    # --------------------------
-    if not os.path.exists(model_path):
-        raise FileNotFoundError(f"Model file not found: {model_path}")
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
-    model.load_state_dict(torch.load(model_path, map_location=device))
-    print(f"Loaded model from: {model_path}")
-
-    # --------------------------
-    # Evaluate
-    # --------------------------
-    acc = evaluate(model, test_loader, device)
-    print(f"\nTest Accuracy ({model_type}): {acc:.4f}")
+    model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+    metrics = evaluate_multiclass(model, test_loader, device) if task_type == "multiclass" else evaluate_multilabel(model, test_loader, device)
+    metric_name, metric_value = next(iter(metrics.items()))
+    print(f"Loaded checkpoint: {checkpoint_path}")
+    print(f"Test result ({model_type}) | {metric_name}: {metric_value:.4f}")
 
 
-# --------------------------
-# Entry point
-# --------------------------
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
